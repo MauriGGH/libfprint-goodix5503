@@ -88,6 +88,22 @@ nbis_sources = [
 ]
 
 driver_sources = {
+        'goodix53x5' : files(
+        'drivers/goodix53x5/goodix53x5.c',
+        'drivers/goodix53x5/goodix53x5-proto.c',
+        'drivers/goodix53x5/goodix53x5-crypto.c',
+        'drivers/goodix53x5/goodix53x5-transport.c',
+        'drivers/goodix53x5/goodix53x5-commands.c',
+        'drivers/goodix53x5/goodix53x5-session.c',
+        'drivers/goodix53x5/goodix53x5-tls.c',
+        'drivers/goodix53x5/goodix53x5-scan.c',
+        'drivers/goodix53x5/goodix53x5-enroll.c',
+        'drivers/goodix53x5/goodix53x5-auth.c',
+        'drivers/goodix53x5/goodix53x5-match.c',
+        'drivers/goodix53x5/goodix53x5-calibration.c',
+        'drivers/goodix53x5/goodix53x5-image.c',
+    ),
+
     'upekts' : files(
         'drivers/upekts.c',
         'drivers/upek_proto.c',
@@ -249,12 +265,31 @@ libfprint_private = static_library('fprint-private',
     dependencies: deps,
     link_with: libnbis,
     install: false)
-
+opencv_pc = dependency('opencv5', required: false)
+if not opencv_pc.found()
+    opencv_pc = dependency('opencv4')
+endif
+opencv_includes = opencv_pc.partial_dependency(compile_args: true, includes: true)
+opencv_core = cc.find_library('opencv_core')
+opencv_features2d = cc.find_library('opencv_features2d', required: false)
+if not opencv_features2d.found()
+    opencv_features2d = cc.find_library('opencv_features')
+endif
+opencv_flann = cc.find_library('opencv_flann')
+opencv_imgproc = cc.find_library('opencv_imgproc')
+opencv_dep = declare_dependency(
+    dependencies: [opencv_includes, opencv_core, opencv_features2d, opencv_flann, opencv_imgproc],
+)
+libsigfm = static_library('sigfm',
+    'sigfm/sigfm.cpp',
+    dependencies: [opencv_dep],
+    cpp_args: ['-std=c++17'],
+    install: false)
 libfprint_drivers = static_library('fprint-drivers',
     sources: drivers_sources,
     c_args: drivers_cflags,
     dependencies: deps,
-    link_with: libfprint_private,
+    link_with: [libfprint_private, libsigfm],
     install: false)
 
 mapfile = files('libfprint.ver')[0]
@@ -274,8 +309,8 @@ libfprint = shared_library(versioned_libname.split('lib')[1],
     version: libversion,
     link_args : vflag,
     link_depends : mapfile,
-    link_with: [libfprint_drivers, libfprint_private],
-    dependencies: deps,
+    link_with: [libfprint_drivers, libfprint_private, libsigfm],
+    dependencies: [deps,opencv_dep],
     install: true)
 
 libfprint_dep = declare_dependency(link_with: libfprint,

@@ -137,6 +137,7 @@ drivers_info = {
     'elan': { 'endian_dependent': true },
     'elanmoc': {},
     'uru4000': { 'helper': ['openssl'] },
+    'goodix53x5' : { 'helper': ['openssl'] },
     'upektc': {},
     'upeksonly': {},
     'upekts': {},
