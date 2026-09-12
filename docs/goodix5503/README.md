@@ -1,63 +1,63 @@
-# Driver libfprint para Goodix 27c6:5503
+# Goodix 27c6:5503 driver for libfprint
 
-Documentación del trabajo para hacer funcionar el lector de huellas Goodix
-`27c6:5503` (Lenovo IdeaPad 3 15ITL6 / 82H8) con libfprint y fprintd en Linux,
-incluido el inicio de sesión y `sudo` mediante PAM.
+Documentation of the work needed to make the Goodix `27c6:5503` fingerprint
+reader (Lenovo IdeaPad 3 15ITL6 / 82H8) work with libfprint and fprintd on
+Linux, including login and `sudo` through PAM.
 
-No existía ningún driver para este PID. Se construyó a partir de dos fuentes:
-el script Python de ingeniería inversa `driver_5503.py` del proyecto
-[goodix-fp-dump](https://github.com/goodix-fp-linux-dev/goodix-fp-dump) (que
-define el protocolo) y el driver libfprint
+There was no driver for this PID. It was built from two sources: the reverse
+engineering script `driver_5503.py` from
+[goodix-fp-dump](https://github.com/goodix-fp-linux-dev/goodix-fp-dump)
+(which defines the protocol), and the libfprint driver
 [AndyHazz/goodix53x5-libfprint](https://github.com/AndyHazz/goodix53x5-libfprint)
-(commit `309d4c6`) para los chips 5335/5385/5395, que aportó la arquitectura
-(máquinas de estados, integración con libfprint y matching SIGFM). Resultó que
-el protocolo de esa plantilla **no** es el del 5503, así que casi todo el
-transporte, la sesión y la captura se reescribieron.
+(commit `309d4c6`) for the 5335/5385/5395 chips, which provided the
+architecture (state machines, libfprint integration and SIGFM matching). The
+protocol of that template turned out **not** to be the 5503's, so almost all
+of the transport, session and capture code was rewritten.
 
-Este documento explica qué hace el driver, cómo se descubrió cada cosa, qué
-datos respaldan cada decisión, cómo compilarlo, probarlo e instalarlo, y qué
-queda pendiente.
+This document explains what the driver does, how each piece was discovered,
+which measurements back each decision, how to build, test and install it, and
+what is left to do.
 
 ---
 
-## Índice
+## Contents
 
-1. [Estado actual](#1-estado-actual)
+1. [Current status](#1-current-status)
 2. [Hardware](#2-hardware)
-3. [Organización del código](#3-organización-del-código)
-4. [Protocolo USB del 5503](#4-protocolo-usb-del-5503)
-5. [Detección de dedo](#5-detección-de-dedo)
-6. [Imagen y matching](#6-imagen-y-matching)
-7. [Compilar, probar e instalar](#7-compilar-probar-e-instalar)
-8. [fprintd, PAM y el inicio de sesión](#8-fprintd-pam-y-el-inicio-de-sesión)
-9. [Arranque dual con Windows (PSK)](#9-arranque-dual-con-windows-psk)
-10. [Variables de entorno](#10-variables-de-entorno)
-11. [Seguridad](#11-seguridad)
-12. [Limitaciones y trabajo pendiente](#12-limitaciones-y-trabajo-pendiente)
-13. [Historia del proyecto](#13-historia-del-proyecto)
-14. [Herramientas de análisis](#14-herramientas-de-análisis)
-15. [Referencias](#15-referencias)
+3. [Code layout](#3-code-layout)
+4. [5503 USB protocol](#4-5503-usb-protocol)
+5. [Finger detection](#5-finger-detection)
+6. [Image and matching](#6-image-and-matching)
+7. [Build, test and install](#7-build-test-and-install)
+8. [fprintd, PAM and the login screen](#8-fprintd-pam-and-the-login-screen)
+9. [Dual boot with Windows (PSK)](#9-dual-boot-with-windows-psk)
+10. [Environment variables](#10-environment-variables)
+11. [Security](#11-security)
+12. [Limitations and future work](#12-limitations-and-future-work)
+13. [Project history](#13-project-history)
+14. [Analysis tools](#14-analysis-tools)
+15. [References](#15-references)
 
 ---
 
-## 1. Estado actual
+## 1. Current status
 
-| Función | Estado |
+| Feature | Status |
 |---|---|
-| Apertura del dispositivo (USB, PSK, TLS, configuración) | Funciona |
-| Handshake TLS-PSK con el sensor | Funciona (TLS 1.2, `PSK-AES128-CBC-SHA256`) |
-| Captura y descifrado de imágenes (64×80, 12 bits) | Funciona |
-| Detección de dedo puesto / retirado | Funciona, por sondeo de zonas (sección 5) |
-| Enroll (8 muestras) | Funciona |
-| Verify / identify (SIGFM) | Funciona; ver precisión en 6.4 |
-| fprintd + PAM (`sudo`, inicio de sesión) | Funciona |
-| Arranque dual con Windows | Funciona, reescribiendo el PSK automáticamente (sección 9) |
-| Bloqueo de pantalla, suspender/reanudar | Sin probar |
+| Device open (USB, PSK, TLS, configuration) | Works |
+| TLS-PSK handshake with the sensor | Works (TLS 1.2, `PSK-AES128-CBC-SHA256`) |
+| Image capture and decryption (64×80, 12-bit) | Works |
+| Finger down / finger up detection | Works, by polling the sensor zones (section 5) |
+| Enroll (8 samples) | Works |
+| Verify / identify (SIGFM) | Works; see accuracy in 6.4 |
+| fprintd + PAM (`sudo`, login) | Works |
+| Dual boot with Windows | Works, rewriting the PSK automatically (section 9) |
+| Lock screen, suspend/resume | Works (unlocking after a suspend tested) |
 
-Precisión medida (sección 6.4): **0 de 9** intentos con otro dedo aceptados.
-Con el dedo registrado, el centro de la yema se reconoce de forma fiable; la
-punta y los costados fallan si no están en la plantilla (el sensor solo ve una
-parte del dedo).
+Measured accuracy (section 6.4): **0 out of 9** attempts with a different
+finger were accepted. With the enrolled finger, the centre of the pad is
+recognised reliably; the tip and the sides fail if they are not in the
+template (the sensor only sees part of the finger).
 
 ---
 
@@ -65,57 +65,57 @@ parte del dedo).
 
 | | |
 |---|---|
-| Equipo | Lenovo IdeaPad 3 15ITL6 (82H8), i7-1165G7 |
-| USB | `27c6:5503` "Goodix FingerPrint Device", USB 2.0 alta velocidad |
-| Interfaz | 0, clase 255 (vendor specific) |
+| Machine | Lenovo IdeaPad 3 15ITL6 (82H8), i7-1165G7 |
+| USB | `27c6:5503` "Goodix FingerPrint Device", USB 2.0 high speed |
+| Interface | 0, class 255 (vendor specific) |
 | Endpoints | `0x01` bulk OUT, `0x82` bulk IN, `wMaxPacketSize` 512 |
-| Firmware | `GF3208_RTSEC_APP_10062` (IAP `MILAN_RTSEC_IAP_10027` según goodix-fp-dump) |
-| Chip ID | `0x00220fa6` (bytes `0f a6 00 22` del registro 0) |
-| OTP | 64 bytes (no se interpreta; ver 12) |
-| Imagen | 5120 píxeles de 12 bits = 7680 bytes, **64 columnas × 80 filas** |
+| Firmware | `GF3208_RTSEC_APP_10062` (IAP `MILAN_RTSEC_IAP_10027` according to goodix-fp-dump) |
+| Chip ID | `0x00220fa6` (bytes `0f a6 00 22` from register 0) |
+| OTP | 64 bytes (not interpreted; see 12) |
+| Image | 5120 12-bit pixels = 7680 bytes, **64 columns × 80 rows** |
 
-El equipo tiene arranque dual con Windows, donde el driver oficial de Goodix
-(3.1.586.580) funciona. Esto importa por el PSK (sección 9).
+The machine dual-boots Windows, where the official Goodix driver
+(3.1.586.580) works. This matters because of the PSK (section 9).
 
 ---
 
-## 3. Organización del código
+## 3. Code layout
 
-El driver conserva el nombre `goodix53x5` de la plantilla (la carpeta, el
-`FP_COMPONENT` y el id de driver en meson) y se identifica ante el usuario como
-**"Goodix 5503"** (`full_name`). Es un `FpDevice` (no un `FpImageDevice`): hace
-el matching dentro del driver con SIGFM y guarda plantillas "raw" en fprintd.
+The driver keeps the template's name `goodix53x5` (directory, `FP_COMPONENT`
+and driver id in meson) and presents itself to the user as **"Goodix 5503"**
+(`full_name`). It is an `FpDevice` (not an `FpImageDevice`): it matches inside
+the driver with SIGFM and stores "raw" templates in fprintd.
 
-### 3.1 Archivos (`libfprint/drivers/goodix53x5/`)
+### 3.1 Files (`libfprint/drivers/goodix53x5/`)
 
-| Archivo | Contenido |
+| File | Contents |
 |---|---|
-| `goodix53x5.c` | Clase GObject, tabla de IDs USB, `open`/`close`/`enroll`/`verify`/`identify` |
-| `goodix53x5-private.h` | Estado del dispositivo, geometría del sensor, constantes PSK |
-| `goodix53x5-proto.c/h` | Formato de "message pack" y de mensaje de protocolo, reensamblado de lecturas |
-| `goodix53x5-transport.c/h` | Transferencias USB, sub-SSM de comando (enviar → ACK → datos), drenaje, volcado hex |
-| `goodix53x5-commands.c/h` | Comandos con nombre (nop, firmware, reset, PSK, TLS, config, FDT, imagen…) |
-| `goodix53x5-session.c/h` | SSM de apertura, escritura opcional del PSK, handshake TLS, reinicialización tras suspensión |
-| `goodix53x5-tls.c/h` | Servidor TLS-PSK con OpenSSL sobre BIOs de memoria |
-| `goodix53x5-scan.c/h` | Referencia sin dedo, espera de dedo (sondeo), captura, espera de retirada, desactivación |
-| `goodix53x5-image.c/h` | Decodificación 12 bits, PGM de diagnóstico, preprocesado a 8 bits |
-| `goodix53x5-enroll.c/h` | SSM de enroll y construcción de la plantilla |
-| `goodix53x5-auth.c/h` | SSM de verify/identify y decisión de coincidencia |
-| `goodix53x5-match.c/h` | Envoltorio C de SIGFM (extracción, serialización, puntuación) |
-| `goodix53x5-calibration.c/h` | `DEVICE_CONFIG` del 5503; el resto es cálculo de OTP/FDT de la 53x5 (no se usa) |
-| `goodix53x5-crypto.c/h` | Restos de "GTLS" de la 53x5 (no se usan en el 5503) |
+| `goodix53x5.c` | GObject class, USB id table, `open`/`close`/`enroll`/`verify`/`identify` |
+| `goodix53x5-private.h` | Device state, sensor geometry, PSK constants |
+| `goodix53x5-proto.c/h` | Message pack and protocol message formats, read reassembly |
+| `goodix53x5-transport.c/h` | USB transfers, command sub-SSM (send → ACK → data), drain, hex logging |
+| `goodix53x5-commands.c/h` | Named commands (nop, firmware, reset, PSK, TLS, config, FDT, image…) |
+| `goodix53x5-session.c/h` | Open SSM, optional PSK write, TLS handshake, reinit after suspend |
+| `goodix53x5-tls.c/h` | TLS-PSK server with OpenSSL over memory BIOs |
+| `goodix53x5-scan.c/h` | No-finger reference, finger wait (polling), capture, finger-up wait, deactivation |
+| `goodix53x5-image.c/h` | 12-bit decoding, diagnostic PGM, 8-bit preprocessing |
+| `goodix53x5-enroll.c/h` | Enroll SSM and template assembly |
+| `goodix53x5-auth.c/h` | Verify/identify SSM and match decision |
+| `goodix53x5-match.c/h` | C wrapper around SIGFM (extraction, serialisation, scoring) |
+| `goodix53x5-calibration.c/h` | The 5503 `DEVICE_CONFIG`; the rest is 53x5 OTP/FDT math (unused) |
+| `goodix53x5-crypto.c/h` | Leftover 53x5 "GTLS" code (unused on the 5503) |
 
-`libfprint/sigfm/` contiene SIGFM (matching basado en SIFT con OpenCV), tomado
-de la plantilla. Cambios de build: `libfprint/meson.build` (fuentes del driver,
-OpenCV, `libsigfm`) y `meson.build` (entrada del driver con el helper `openssl`).
+`libfprint/sigfm/` contains SIGFM (SIFT-based matching with OpenCV), taken
+from the template. Build changes: `libfprint/meson.build` (driver sources,
+OpenCV, `libsigfm`) and `meson.build` (driver entry with the `openssl` helper).
 
-### 3.2 Máquinas de estados
+### 3.2 State machines
 
-Todo es asíncrono sobre el bucle de GLib: cada paso es un estado de un `FpiSsm`
-y las esperas usan transferencias USB o temporizadores
-(`fpi_ssm_jump_to_state_delayed`), nunca bucles bloqueantes.
+Everything is asynchronous on the GLib main loop: each step is a state of an
+`FpiSsm` and waits use USB transfers or timers
+(`fpi_ssm_jump_to_state_delayed`), never blocking loops.
 
-- **Apertura** (`session.c`): `USB_RESET` (set_configuration) → `CLAIM_INTERFACE`
+- **Open** (`session.c`): `USB_RESET` (set_configuration) → `CLAIM_INTERFACE`
   → `DRAIN` → `PING` → `READ_FW_VERSION` → `RESET` → `READ_CHIP_ID` →
   `READ_OTP` → `PARSE_OTP` → `READ_PSK_HASH` → `WRITE_PSK` →
   `VERIFY_PSK_WRITE` → `CHECK_PSK_WRITE` → `TLS_REQUEST` → `TLS_RECV` ⇄
@@ -124,322 +124,328 @@ y las esperas usan transferencias USB o temporizadores
 - **Enroll** (`enroll.c`): `REINIT` → `CAPTURE_REF` → `WAIT_FINGER` →
   `CAPTURE` → `PROCESS` (SIGFM) → `WAIT_FINGER_UP` → `NEXT` (350 ms) ×8.
 - **Verify/identify** (`auth.c`): `REINIT` → `CAPTURE_REF` → `WAIT_FINGER` →
-  `CAPTURE` → `MATCH` → `FINISH` (espera de retirada si no coincide,
-  desactivación si coincide).
-- **Sub-SSMs de captura** (`scan.c`): referencia sin dedo, espera de dedo,
-  captura, espera de retirada, desactivación (sección 5).
-- **Sub-SSM de comando** (`transport.c`): `SEND` → `RECV_ACK` →
-  `VALIDATE_ACK` → `RECV_DATA`.
+  `CAPTURE` → `MATCH` → `FINISH` (finger-up wait on no match, deactivation on
+  match).
+- **Capture sub-SSMs** (`scan.c`): no-finger reference, finger wait, capture,
+  finger-up wait, deactivation (section 5).
+- **Command sub-SSM** (`transport.c`): `SEND` → `RECV_ACK` → `VALIDATE_ACK` →
+  `RECV_DATA`.
 
 ---
 
-## 4. Protocolo USB del 5503
+## 4. 5503 USB protocol
 
-La fuente de verdad es `driver_5503.py` + `goodix.py` + `protocol.py` de
-goodix-fp-dump. La plantilla 53x5 implementa otro protocolo ("wrapless", el de
-`driver_53x5.py`: interfaz CDC 1, trozos de continuación `cmd|1`, GTLS por
-mensajes MCU `0xFF01…`), que el 5503 descarta en silencio. Ese fue el primer
-bloqueo (el ping no recibía respuesta).
+The source of truth is `driver_5503.py` + `goodix.py` + `protocol.py` from
+goodix-fp-dump. The 53x5 template implements a different protocol
+("wrapless", the one in `driver_53x5.py`: CDC interface 1, `cmd|1`
+continuation chunks, GTLS through `0xFF01…` MCU messages), which the 5503
+silently ignores. That was the first blocker (the ping never got a reply).
 
 ### 4.1 Message pack
 
-Cada transferencia va envuelta en:
+Every transfer is wrapped as:
 
 ```
-[flags 1][longitud 2 LE][checksum 1][datos…]
-checksum = (flags + longitud_lo + longitud_hi) & 0xFF
+[flags 1][length 2 LE][checksum 1][data…]
+checksum = (flags + length_lo + length_hi) & 0xFF
 ```
 
-| flags | Contenido |
+| flags | Contents |
 |---|---|
-| `0xA0` | Mensaje de protocolo (comandos, respuestas, ACKs) |
-| `0xB0` | Registros TLS del handshake |
-| `0xB2` | Datos de imagen: prefijo de 9 bytes + registros TLS de datos |
+| `0xA0` | Protocol message (commands, replies, ACKs) |
+| `0xB0` | TLS handshake records |
+| `0xB2` | Image data: 9-byte prefix + TLS application-data records |
 
-Escritura: el pack se rellena con ceros hasta múltiplo de 64 y se envía en
-transferencias de 64 bytes (como `protocol.py`). Lectura: una transferencia de
-hasta 64 KiB; si el pack es mayor, se sigue leyendo y se concatena.
+Writes: the pack is zero-padded to a multiple of 64 and sent as 64-byte
+transfers (as in `protocol.py`). Reads: one transfer of up to 64 KiB; if the
+pack is longer, reads continue and are concatenated.
 
-### 4.2 Mensaje de protocolo (dentro de un pack `0xA0`)
+### 4.2 Protocol message (inside a `0xA0` pack)
 
 ```
-[cmd 1][tamaño 2 LE = payload+1][payload…][checksum 1]
-cmd      = categoría << 4 | comando << 1
-checksum = (0xAA - suma de todos los bytes anteriores) & 0xFF, o 0x88 si no se usa
+[cmd 1][size 2 LE = payload+1][payload…][checksum 1]
+cmd      = category << 4 | command << 1
+checksum = (0xAA - sum of all previous bytes) & 0xFF, or 0x88 when unused
 ```
 
-Cada comando recibe primero un **ACK** (`cmd 0xB0`, payload
-`[cmd reconocido][flags]`, bit 0 = válido) y, si corresponde, después un
-mensaje de respuesta con el mismo `cmd`.
+Every command is first answered with an **ACK** (`cmd 0xB0`, payload
+`[acknowledged cmd][flags]`, bit 0 = valid) and then, when applicable, by a
+reply message with the same `cmd`.
 
-### 4.3 Comandos usados
+### 4.3 Commands used
 
-| cmd | cat/cmd | Nombre (goodix.py) | Payload | Respuesta |
+| cmd | cat/cmd | Name (goodix.py) | Payload | Reply |
 |---|---|---|---|---|
-| `0x00` | 0/0 | nop | `00 00 00 00`, checksum `0x88` | ACK opcional (normalmente no llega) |
-| `0xA8` | A/4 | firmware_version | `00 00` | cadena de firmware |
-| `0xA2` | A/1 | reset (sensor) | `05 14` (reset_sensor, 20 ms) | `[01][número LE16]` |
+| `0x00` | 0/0 | nop | `00 00 00 00`, checksum `0x88` | optional ACK (usually none) |
+| `0xA8` | A/4 | firmware_version | `00 00` | firmware string |
+| `0xA2` | A/1 | reset (sensor) | `05 14` (reset_sensor, 20 ms) | `[01][number LE16]` |
 | `0x82` | 8/1 | read_sensor_register | `00 00 00 04` | 4 bytes (chip ID) |
 | `0xA6` | A/3 | read_otp | `00 00` | 64 bytes |
-| `0xE4` | E/2 | preset_psk_read | `07 00 02 bb 00 00 00 00` | `[estado][flags LE32][len LE32][hash]` |
-| `0xE0` | E/0 | preset_psk_write | flags `0xbb010003` + len + white box (96 B) | `[estado]` (0 = ok) |
-| `0xD0` | D/0 | request_tls_connection | `00 00` | ACK; luego un pack `0xB0` con el ClientHello |
+| `0xE4` | E/2 | preset_psk_read | `07 00 02 bb 00 00 00 00` | `[status][flags LE32][len LE32][hash]` |
+| `0xE0` | E/0 | preset_psk_write | flags `0xbb010003` + len + white box (96 B) | `[status]` (0 = ok) |
+| `0xD0` | D/0 | request_tls_connection | `00 00` | ACK, then a `0xB0` pack with the ClientHello |
 | `0x90` | 9/0 | upload_config_mcu | `DEVICE_CONFIG` (256 B) | `[01]` |
-| `0xC4` | C/2 | set_drv_state | `01 00` | solo ACK (se envía dos veces, como Windows) |
-| `0xD2` | D/1 | mcu_get_pov_image | `00 00` | `[estado]` (`0xff`) |
-| `0x36` | 3/3 | mcu_switch_to_fdt_mode | 22 B (4.8) | `[02 01][máscara 3f 00][6 zonas LE16]` |
-| `0x20` | 2/0 | mcu_get_image | `01 00 8b 00 84 00 8c 00 88 00` | pack `0xB2` (4.7) |
-| `0x32` | 3/1 | mcu_switch_to_fdt_down | 22 B | ACK + un `0x32` incondicional a los ~34 ms (5.1) |
+| `0xC4` | C/2 | set_drv_state | `01 00` | ACK only (sent twice, like Windows) |
+| `0xD2` | D/1 | mcu_get_pov_image | `00 00` | `[state]` (`0xff`) |
+| `0x36` | 3/3 | mcu_switch_to_fdt_mode | 22 B (4.8) | `[02 01][mask 3f 00][6 zones LE16]` |
+| `0x20` | 2/0 | mcu_get_image | `01 00 8b 00 84 00 8c 00 88 00` | `0xB2` pack (4.7) |
+| `0x32` | 3/1 | mcu_switch_to_fdt_down | 22 B | ACK + an unconditional `0x32` after ~34 ms (5.1) |
 | `0xAE` | A/7 | query_mcu_state | `01 00 32` | 2 bytes |
 
-Otros comandos de goodix.py (`0x34` fdt_up, `0xD6` pov_image_check,
-`0x70` idle, …) existen pero el driver actual no los usa.
+Other goodix.py commands (`0x34` fdt_up, `0xD6` pov_image_check, `0x70`
+idle, …) exist but the current driver does not use them.
 
-### 4.4 Apertura
+### 4.4 Open sequence
 
-1. `set_configuration(1)`, reclamar la interfaz 0 (desligando el driver del
-   kernel si lo hubiera).
-2. **Drenaje**: leer y descartar lo que haya pendiente en `0x82` hasta un
-   timeout de 100 ms (equivale a `empty_buffer()` de goodix.py).
-3. nop, versión de firmware, reset del sensor, chip ID, OTP.
+1. `set_configuration(1)`, claim interface 0 (detaching any kernel driver).
+2. **Drain**: read and discard whatever is pending on `0x82` until a 100 ms
+   timeout (equivalent to `empty_buffer()` in goodix.py).
+3. nop, firmware version, sensor reset, chip ID, OTP.
 4. **PSK** (4.5).
-5. **Handshake TLS** (4.6).
+5. **TLS handshake** (4.6).
 6. `upload_config_mcu(DEVICE_CONFIG)`, `set_drv_state` ×2, `mcu_get_pov_image`.
 
 ### 4.5 PSK
 
-El sensor guarda un PSK en su flash y cifra las imágenes con una sesión TLS
-basada en él. `driver_5503.py` usa el PSK de **32 bytes a cero**; su hash
-(`PMK_HASH`) es `81b8ff49…5ee50361`. El driver lee el hash con
-`preset_psk_read(0xbb020007)` y lo compara con `PMK_HASH` y con `sha256(PSK)`.
+The sensor stores a PSK in its flash and encrypts images with a TLS session
+based on it. `driver_5503.py` uses the **all-zero 32-byte** PSK; its hash
+(`PMK_HASH`) is `81b8ff49…5ee50361`. The driver reads the hash with
+`preset_psk_read(0xbb020007)` and compares it with `PMK_HASH` and with
+`sha256(PSK)`.
 
-Si no coincide, **por defecto no escribe nada**: registra
+If it does not match, **by default nothing is written**: the driver logs
 `PSK mismatch, write skipped - set GOODIX5503_ALLOW_PSK_WRITE=1 to write it`,
-sigue, y el handshake TLS falla más adelante con un mensaje que lo indica.
-Solo con `GOODIX5503_ALLOW_PSK_WRITE=1` escribe el "white box" del PSK cero
-(`preset_psk_write(0xbb010003, PSK_WHITE_BOX)`) y verifica releyendo el hash.
-La escritura es **persistente** en el sensor (sección 9).
+continues, and the TLS handshake then fails with a message saying so. Only
+with `GOODIX5503_ALLOW_PSK_WRITE=1` does it write the white box of the zero
+PSK (`preset_psk_write(0xbb010003, PSK_WHITE_BOX)`) and verify it by reading
+the hash again. The write is **persistent** on the sensor (section 9).
 
-### 4.6 Handshake TLS-PSK
+### 4.6 TLS-PSK handshake
 
-El sensor actúa como **cliente** TLS y el driver como servidor, igual que
-`driver_5503.py` con `openssl s_server -nocert -psk 00…00`, pero con OpenSSL
-enlazado y sin procesos ni sockets:
+The sensor acts as the TLS **client** and the driver as the server, just like
+`driver_5503.py` with `openssl s_server -nocert -psk 00…00`, but with OpenSSL
+linked in and no processes or sockets:
 
 - `SSL_CTX_new(TLS_server_method())`, `SSL_CTX_set_psk_server_callback`
-  (devuelve el PSK cero y acepta cualquier identidad; el sensor manda
+  (returns the zero PSK and accepts any identity; the sensor sends
   `"Client_identity"`).
-- Dos BIOs de memoria (`BIO_s_mem`, con `BIO_set_mem_eof_return(-1)`) como
-  transporte: lo que llega del sensor en packs `0xB0` se escribe en uno; lo que
-  OpenSSL produce se lee del otro y se envía en packs `0xB0`, sin ACK.
-- Secuencia observada: ClientHello (el sensor ofrece solo `0x00ae`
+- Two memory BIOs (`BIO_s_mem`, with `BIO_set_mem_eof_return(-1)`) as the
+  transport: what the sensor sends in `0xB0` packs is written into one; what
+  OpenSSL produces is read from the other and sent in `0xB0` packs, without
+  ACKs.
+- Observed sequence: ClientHello (the sensor only offers `0x00ae`
   = PSK-AES128-CBC-SHA256) → ServerHello + ServerHelloDone →
-  ClientKeyExchange, ChangeCipherSpec, Finished (tres packs) →
-  ChangeCipherSpec + Finished. Tras el último envío se esperan 10 ms
-  (goodix-fp-dump lo hace para evitar un timeout USB).
-- Resultado: **TLS 1.2, PSK-AES128-CBC-SHA256**. La sesión queda en
-  `self->tls` y solo se usa para descifrar imágenes.
+  ClientKeyExchange, ChangeCipherSpec, Finished (three packs) →
+  ChangeCipherSpec + Finished. The driver waits 10 ms after the last flight
+  (goodix-fp-dump does so to avoid a USB timeout).
+- Result: **TLS 1.2, PSK-AES128-CBC-SHA256**. The session stays in
+  `self->tls` and is only used to decrypt images.
 
-Nota: la configuración y los demás comandos **no** pasan por TLS; solo la
-respuesta de imagen.
+Note: the configuration and the other commands do **not** go through TLS;
+only the image reply does.
 
-### 4.7 Captura de imagen
+### 4.7 Image capture
 
-`mcu_get_image` es un comando normal. La respuesta es un pack `0xB2` de 7758
-bytes de datos:
+`mcu_get_image` is a normal command. The reply is a `0xB2` pack with 7758
+bytes of data:
 
 ```
 00 20 4a 1e 00 00 00 00 00 | 17 03 03 1e 40 …
-└── prefijo de 9 bytes ──┘   └── registro TLS 1.2 de datos de aplicación
+└──── 9-byte prefix ─────┘   └── TLS 1.2 application-data record
 ```
 
-En las capturas vistas, el prefijo es `[00][20 = cmd][longitud de lo que sigue
-tras los 4 primeros bytes, LE16][00 ×5]`. El driver comprueba que tras el
-prefijo haya `17 03 03`, descifra los 7749 bytes de registros con `SSL_read` y
-obtiene **7684 bytes**; se descartan los 4 últimos (como el script) y quedan
-7680 bytes = 5120 píxeles de 12 bits.
+In every capture seen so far the prefix is `[00][20 = cmd][length of what
+follows the first 4 bytes, LE16][00 ×5]`. The driver checks that `17 03 03`
+follows the prefix, decrypts the 7749 bytes of records with `SSL_read` and
+gets **7684 bytes**; the last 4 are dropped (as in the script), leaving 7680
+bytes = 5120 12-bit pixels.
 
-Decodificación (igual que `tool.decode_image`), 6 bytes → 4 píxeles:
+Decoding (same as `tool.decode_image`), 6 bytes → 4 pixels:
 
 ```
 p0 = ((b0 & 0xF) << 8) | b1        p1 = (b3 << 4) | (b0 >> 4)
 p2 = ((b5 & 0xF) << 8) | b2        p3 = (b4 << 4) | (b5 >> 4)
 ```
 
-**Geometría**: los píxeles forman **64 columnas × 80 filas**. En
-`driver_5503.py` las constantes se llaman al revés (`SENSOR_WIDTH = 80`,
-`SENSOR_HEIGHT = 64`), pero su `write_pgm` escribe filas de 64. SIGFM recibía
-80×64 al principio (filas desalineadas); se corrigió en `private.h`.
+**Geometry**: the pixels form **64 columns × 80 rows**. In `driver_5503.py`
+the constants are named the other way round (`SENSOR_WIDTH = 80`,
+`SENSOR_HEIGHT = 64`), but its `write_pgm` writes rows of 64. SIGFM was
+initially given 80×64 (misaligned rows); this was fixed in `private.h`.
 
-Valores típicos de un frame crudo: sin dedo, media ~1150-1170; con dedo,
-~220-490 (hasta ~740 si solo apoya parte).
+Typical raw frame values: no finger, mean ~1150-1170; finger, ~220-490 (up
+to ~740 with partial contact).
 
-### 4.8 Configuración y payloads FDT
+### 4.8 Configuration and FDT payloads
 
-`DEVICE_CONFIG` mide **256 bytes** (no 272) y se envía tal cual. La plantilla
-la "parcheaba" con valores de OTP de la 53x5 salvo si medía 272, lo que en la
-práctica corrompía el checksum; se envía sin parchear.
+`DEVICE_CONFIG` is **256 bytes** (not 272) and is sent as is. The template
+"patched" it with 53x5 OTP values unless it was 272 bytes long, which in
+practice corrupted its checksum; it is now sent unpatched.
 
-Payloads FDT (de `driver_5503.py`):
-`[op][01][registros 8b 84 8c 88 en LE16][6 umbrales en LE16 con byte bajo 0x80]`.
+FDT payloads (from `driver_5503.py`):
+`[op][01][registers 8b 84 8c 88 as LE16][6 thresholds as LE16 with low byte 0x80]`.
 
-| Uso | op | Umbrales (byte alto) |
+| Use | op | Thresholds (high byte) |
 |---|---|---|
-| fdt_mode antes de la referencia y para sondear | `0d` | 96 91 92 85 8c 86 |
-| fdt_mode tras capturar | `0d` | b9 ae b9 af b5 aa |
-| fdt_down (Python lo usa para esperar el dedo) | `0c` | b9 ae b9 af b5 aa |
-| fdt_down final ("idle") | `0c` | ba af ba b0 b6 ab |
-| fdt_up #1 / #2 (no se usan) | `0e` | 95 89 99 8a 8d 8d / 9b 8e a2 90 9f a8 |
+| fdt_mode before the reference frame and for polling | `0d` | 96 91 92 85 8c 86 |
+| fdt_mode after a capture | `0d` | b9 ae b9 af b5 aa |
+| fdt_down (used by the Python script to wait for the finger) | `0c` | b9 ae b9 af b5 aa |
+| final fdt_down ("idle") | `0c` | ba af ba b0 b6 ab |
+| fdt_up #1 / #2 (unused) | `0e` | 95 89 99 8a 8d 8d / 9b 8e a2 90 9f a8 |
 
-Las respuestas FDT traen `[02][00 o 01][máscara 3f 00][6 lecturas LE16]`, una
-lectura por zona del sensor.
+FDT replies carry `[02][00 or 01][mask 3f 00][6 readings LE16]`, one reading
+per sensor zone.
 
 ---
 
-## 5. Detección de dedo
+## 5. Finger detection
 
-### 5.1 Por qué no se usan los eventos FDT del sensor
+### 5.1 Why the sensor's FDT events are not used
 
-`driver_5503.py` espera el dedo con `mcu_switch_to_fdt_down(…, reply=True)`
-y toma cualquier respuesta `0x32` como "dedo detectado". En el hardware real,
-**sin dedo**, esa respuesta llega siempre ~34 ms después de armar:
+`driver_5503.py` waits for the finger with `mcu_switch_to_fdt_down(…, reply=True)`
+and treats any `0x32` reply as "finger detected". On the real hardware,
+**without a finger**, that reply always arrives ~34 ms after arming:
 
-| Prueba (sin dedo) | ¿Llega el `0x32`? |
+| Test (no finger) | Does the `0x32` arrive? |
 |---|---|
-| Umbrales de Python, armado doble | sí, a los 34 ms |
-| Umbrales = lectura base + 0x10 | sí |
-| Umbrales = lectura base − 20 | sí |
-| Umbrales 0xff | sí |
-| Un solo armado | sí |
+| Python thresholds, armed twice | yes, after 34 ms |
+| Thresholds = baseline reading + 0x10 | yes |
+| Thresholds = baseline reading − 20 | yes |
+| Thresholds 0xff | yes |
+| Armed once | yes |
 
-Es una respuesta incondicional ("armado, estas son las lecturas"), no una
-detección. El script solo "funciona" si el dedo ya está puesto. Con un sondeo
-de diagnóstico (fase pasiva de 20 s tras armar), **tocar el sensor no produjo
-ningún mensaje adicional**. Con los umbrales de Python, `fdt_up` sin dedo nunca
-respondió en 20 s (probable causa del cuelgue en `mcu_switch_to_fdt_up` del
-issue 43 de goodix-fp-dump). Los otros drivers de goodix-fp-dump siguen el
-mismo patrón con umbrales copiados de capturas de Windows.
+It is an unconditional reply ("armed, here are the readings"), not a
+detection. The script only "works" if the finger is already on the sensor.
+With a diagnostic probe (a 20 s passive phase after arming), **touching the
+sensor produced no further message**. With the Python thresholds, `fdt_up`
+without a finger never answered within 20 s (a likely cause of the hang in
+`mcu_switch_to_fdt_up` reported in goodix-fp-dump issue 43). The other
+goodix-fp-dump drivers follow the same pattern with thresholds copied from
+Windows captures.
 
-### 5.2 Qué cambia realmente con un dedo
+### 5.2 What actually changes with a finger
 
-Se sondearon las lecturas de `fdt_mode` (4 veces por segundo durante 30 s,
-122 ciclos: 84 sin dedo y 38 con dedo; la media del frame sirvió de verdad de
-referencia):
+The `fdt_mode` readings were polled (4 times per second for 30 s, 122 cycles:
+84 without a finger and 38 with one; the frame mean was used as ground
+truth):
 
-| | Zona 0 | 1 | 2 | 3 | 4 | 5 |
+| | Zone 0 | 1 | 2 | 3 | 4 | 5 |
 |---|---|---|---|---|---|---|
-| Sin dedo, media | 176.8 | 148.0 | 202.5 | 165.4 | 191.3 | 155.6 |
-| Sin dedo, desviación típica | 0.5 | 0.5 | 0.6 | 0.6 | 0.6 | 0.6 |
-| Toque firme (ejemplo) | 49 | 54 | 95 | 5 | 36 | 45 |
-| Punta del dedo (ejemplo) | 175 | 147 | 80 | 140 | 85 | 76 |
+| No finger, mean | 176.8 | 148.0 | 202.5 | 165.4 | 191.3 | 155.6 |
+| No finger, standard deviation | 0.5 | 0.5 | 0.6 | 0.6 | 0.6 | 0.6 |
+| Firm touch (example) | 49 | 54 | 95 | 5 | 36 | 45 |
+| Fingertip (example) | 175 | 147 | 80 | 140 | 85 | 76 |
 
-- El dedo **baja** las lecturas. Sin dedo, ninguna zona se aleja más de 2.6 de
-  su media; con contacto real, la zona más afectada cae **89 o más**.
-- La punta solo cubre las zonas 2-5: la regla debe mirar *cualquier* zona.
-- Las cabeceras (`02 01` / `02 00`) y la máscara `3f` nunca cambian: no hay un
-  flag de "toque".
-- Entre ejecuciones la base varía unos pocos puntos: se mide en cada espera.
+- A finger **lowers** the readings. Without a finger no zone strays more than
+  2.6 from its mean; with real contact the most affected zone drops by **89
+  or more**.
+- A fingertip only covers zones 2-5: the rule must look at *any* zone.
+- The headers (`02 01` / `02 00`) and the `3f` mask never change: there is no
+  "touch" flag.
+- The baseline shifts by a few points between runs, so it is measured at the
+  start of every wait.
 
-### 5.3 Algoritmo (sondeo, `scan.c`)
+### 5.3 Algorithm (polling, `scan.c`)
 
-Cada ~100 ms (período medido: 9.9 Hz, ~1 % de CPU) se envía `fdt_mode` y se
-leen las 6 zonas.
+Every ~100 ms (measured period: 9.9 Hz, ~1 % CPU) the driver sends `fdt_mode`
+and reads the 6 zones.
 
-- **Espera de dedo**: la primera lectura es la **base sin dedo**. Dedo puesto
-  si **alguna** zona queda **≥ 20** por debajo de la base en **2 lecturas
-  seguidas** (esas ~100-200 ms dejan que la presión se asiente antes de
-  capturar).
-- **Espera de retirada**: dedo retirado si **todas** las zonas vuelven a
-  **≤ 10** de la base (la de la espera de dedo del mismo ciclo, no una lectura
-  tomada con el dedo puesto) en **2 lecturas seguidas**. El margen entre 20 y
-  10 evita oscilaciones.
-- **Recuperación**: si alguna zona **sube ≥ 20** por encima de la base en 2
-  lecturas, el dedo ya estaba puesto cuando se tomaron la base y la imagen de
-  referencia (por ejemplo, un toque rápido justo tras retirarlo). Se vuelven a
-  capturar referencia y base y se sigue esperando. Sin esto la espera quedaba
-  colgada para siempre.
-- **Cancelación**: se comprueba el `GCancellable` de la acción antes de cada
-  lectura (≤ 100 ms de latencia). No hay lecturas USB bloqueantes, así que la
-  suspensión del sistema se completa de inmediato.
-- **Cierre**: tras la retirada (o tras un verify correcto) se replica la cola
-  de `driver_5503.py`: `fdt_down` "idle", consumir su `0x32` inmediato y
-  `query_mcu_state(01 00 32)`.
-- El transporte descarta cualquier evento FDT (`0x32`/`0x34`) que llegue donde
-  se esperaba un ACK.
+- **Finger wait**: the first reading is the **no-finger baseline**. A finger
+  is down when **any** zone is **≥ 20** below the baseline in **2
+  consecutive readings** (those ~100-200 ms let the pressure settle before
+  capturing).
+- **Finger-up wait**: the finger is lifted when **every** zone is back within
+  **≤ 10** of the baseline (the one from the finger wait of the same cycle,
+  not a reading taken with the finger on) in **2 consecutive readings**. The
+  gap between 20 and 10 prevents flapping.
+- **Recovery**: if any zone **rises ≥ 20** above the baseline in 2 readings,
+  the finger was already on the sensor when the baseline and the reference
+  frame were taken (for example a quick re-touch right after lifting). Both
+  are captured again and the wait continues. Without this, the wait hung
+  forever.
+- **Cancellation**: the action's `GCancellable` is checked before every
+  reading (≤ 100 ms latency). There are no blocking USB reads, so system
+  suspend completes immediately.
+- **Wrap-up**: after the finger lifts (or after a successful verify) the tail
+  of `driver_5503.py` is replayed: an "idle" `fdt_down`, consuming its
+  immediate `0x32`, and `query_mcu_state(01 00 32)`.
+- The transport drops any FDT event (`0x32`/`0x34`) that arrives where an ACK
+  was expected.
 
-### 5.4 Resultados
+### 5.4 Results
 
-- Sin dedo: 0 falsos positivos (caídas entre −2 y +2 en cientos de lecturas).
-- Cada toque se detectó una lectura después del contacto (~100 ms) y la
-  captura llegó ~37 ms después.
-- Retirada lenta con el sensor medio cubierto 1-3 s: las zonas cubiertas
-  seguían 40-160 por debajo, así que nunca hubo retirada prematura ni
-  oscilación. La cobertura por zona es casi binaria, por lo que el margen
-  20/10 casi no llegó a actuar.
-- Toques rápidos repetidos: la recuperación se disparó 3 veces; las
-  referencias contaminadas (media 304-343) se sustituyeron por limpias
-  (1128-1130) y el siguiente toque se detectó.
+- No finger: 0 false positives (drops between −2 and +2 over hundreds of
+  readings).
+- Every touch was detected one reading after contact (~100 ms) and the
+  capture followed ~37 ms later.
+- Slow lift with the sensor half covered for 1-3 s: the covered zones stayed
+  40-160 below the baseline, so there was never a premature finger-up or any
+  flapping. Coverage per zone is almost binary, so the 20/10 hysteresis band
+  was barely exercised.
+- Quick repeated touches: the recovery fired 3 times; the contaminated
+  reference frames (mean 304-343) were replaced by clean ones (1128-1130) and
+  the next touch was detected.
 
 ---
 
-## 6. Imagen y matching
+## 6. Image and matching
 
-### 6.1 Preprocesado
+### 6.1 Preprocessing
 
-Antes de cada espera se captura un frame **sin dedo** (referencia, el "clear"
-de `driver_5503.py`). La captura con dedo se resta de la referencia y se
-normaliza a 8 bits con los percentiles 3-97 % del interior
-(`goodix_device_image_to_8bit`). SIGFM aplica CLAHE (4.0, 4×4) y extrae SIFT.
+Before every wait a frame **without a finger** is captured (the reference,
+the "clear" frame of `driver_5503.py`). The finger frame is subtracted from
+the reference and normalised to 8 bits with the 3-97 % percentiles of the
+interior (`goodix_device_image_to_8bit`). SIGFM applies CLAHE (4.0, 4×4) and
+extracts SIFT features.
 
-### 6.2 SIGFM y su escala de puntuación
+### 6.2 SIGFM and its score scale
 
-Parámetros: `distance_match 0.85`, `length_match 0.05`, `angle_match 0.05`,
-`min_match 5`, SIFT (contraste 0.04, bordes 18, sigma 2.0). La puntuación
-cuenta **pares de pares de coincidencias** coherentes en distancia y rotación,
-así que crece aproximadamente como M⁴/8 para M coincidencias coherentes. El
-umbral `GOODIX_SIGFM_BEST_MIN = 150` equivale a unas 6-7 coincidencias. Una
-plantilla son las 8 muestras del enroll; verify toma la mejor puntuación.
+Parameters: `distance_match 0.85`, `length_match 0.05`, `angle_match 0.05`,
+`min_match 5`, SIFT (contrast 0.04, edge 18, sigma 2.0). The score counts
+**pairs of match pairs** that are consistent in distance and rotation, so it
+grows roughly as M⁴/8 for M consistent matches. The threshold
+`GOODIX_SIGFM_BEST_MIN = 150` corresponds to about 6-7 matches. A template is
+the 8 enroll samples; verify takes the best score.
 
 ### 6.3 Enroll
 
-8 muestras (`GOODIX_ENROLL_SAMPLES`); se rechaza una muestra con menos de 20
-puntos clave SIFT. El filtro de la plantilla 53x5 por "fracción recortada"
-(píxeles saturados a 4095) **nunca actúa en el 5503**, porque sus frames no se
-saturan.
+8 samples (`GOODIX_ENROLL_SAMPLES`); a sample with fewer than 20 SIFT
+keypoints is rejected. The 53x5 template's "clipped fraction" filter (pixels
+saturated at 4095) **never triggers on the 5503**, because its frames do not
+saturate.
 
-### 6.4 Precisión medida
+### 6.4 Measured accuracy
 
-| Plantilla | Dedo registrado | Otro dedo |
+| Template | Enrolled finger | Other finger |
 |---|---|---|
-| Enroll con el dedo siempre en el centro | 8/16 aceptados | 0/5 (máx. 34) |
-| Enroll recorriendo zonas | 2/4 | 0/4 (máx. 1) |
+| Enroll with the finger always in the centre | 8/16 accepted | 0/5 (max 34) |
+| Enroll moving over zones | 2/4 | 0/4 (max 1) |
 
-Las puntuaciones son "todo o nada": las coincidencias van de 2387 a 483404;
-los fallos del dedo registrado, de 0 a 16. **Bajar el umbral no ayuda**: los
-fallos puntúan por debajo de lo que llegó a puntuar otro dedo (34).
+Scores are all-or-nothing: matches range from 2387 to 483404; failures of
+the enrolled finger from 0 to 16. **Lowering the threshold does not help**:
+those failures score below what another finger reached (34).
 
-La causa es de **cobertura**: el sensor ve una parte pequeña del dedo. El
-centro de la yema se reconoce; la punta y los costados fallan si no están en la
-plantilla. En la práctica (igual que con el driver de Windows) basta con volver
-a tocar. Midiendo la cobertura de contacto de las muestras (píxeles al menos
-300 más oscuros que la referencia), las buenas cubren el 93-99 % del sensor y
-las parciales (punta, medio vacías) el 43-83 %.
+The cause is **coverage**: the sensor sees a small part of the finger. The
+centre of the pad is recognised; the tip and the sides fail if they are not
+in the template. In practice (just as with the Windows driver) touching again
+is enough. Measuring the contact coverage of the samples (pixels at least 300
+darker than the reference), good samples cover 93-99 % of the sensor and
+partial ones (tip, half empty) 43-83 %.
 
-Mejoras propuestas y aplazadas (sección 12): filtro de cobertura ≥ ~85 % en el
-enroll y subir a 16 muestras.
+Proposed and deferred improvements (section 12): a coverage filter of
+≥ ~85 % during enroll and raising the count to 16 samples.
 
 ---
 
-## 7. Compilar, probar e instalar
+## 7. Build, test and install
 
-### 7.1 Compilar
+### 7.1 Build
 
-Dependencias además de las de libfprint: OpenSSL ≥ 3.0 (`libssl-dev`) y
-OpenCV 4 (`libopencv-dev`: core, features2d, flann, imgproc). Se probó con
-OpenSSL 3.0.2 y OpenCV 4.5.4.
+Dependencies besides libfprint's own: OpenSSL ≥ 3.0 (`libssl-dev`) and
+OpenCV 4 (`libopencv-dev`: core, features2d, flann, imgproc). Tested with
+OpenSSL 3.0.2 and OpenCV 4.5.4.
 
-libfprint exige **meson ≥ 0.62**; el de Ubuntu 22.04 / Mint 21 es el 0.61.2.
-Se usó meson 1.12 instalado con pip en un entorno virtual:
+libfprint requires **meson ≥ 0.62**; Ubuntu 22.04 / Mint 21 ship 0.61.2.
+Meson 1.12 installed with pip in a virtual environment was used:
 
 ```bash
 python3 -m venv ~/meson-venv && ~/meson-venv/bin/pip install meson ninja
@@ -447,43 +453,42 @@ python3 -m venv ~/meson-venv && ~/meson-venv/bin/pip install meson ninja
 ninja -C build
 ```
 
-Con la lista de drivers por defecto hace falta además `libudev-dev` (la
-exige el driver SPI `elanspi`); con `-Ddrivers=goodix53x5` no.
+The default driver list also needs `libudev-dev` (required by the SPI driver
+`elanspi`); `-Ddrivers=goodix53x5` does not.
 
-### 7.2 Pruebas sin fprintd
+### 7.2 Testing without fprintd
 
-Para usar los ejemplos de libfprint sin root hace falta dar acceso al
-dispositivo con la regla udev de desarrollo `tools/70-goodix5503.rules`
-(**quitarla al terminar**, sección 11). fprintd debe estar parado
-(`systemctl is-active fprintd`).
+To run the libfprint examples without root, give access to the device with
+the development udev rule `tools/70-goodix5503.rules` (**remove it when
+done**, section 11). fprintd must not be running (`systemctl is-active fprintd`).
 
-Los ejemplos se ejecutan desde `build/` y guardan sus plantillas en
-`build/test-storage.variant` (una por dedo). Piden el dedo por la entrada
-estándar (índice del menú, 6 = índice derecho):
+The examples run from `build/` and keep their templates in
+`build/test-storage.variant` (one per finger). They ask for the finger on
+standard input (menu index, 6 = right index):
 
 ```bash
 cd build
 printf '6\nn\n' | ./examples/enroll
-./examples/verify          # interactivo: dedo, y "Verify again? [Y/n]"
+./examples/verify          # interactive: finger, then "Verify again? [Y/n]"
 ```
 
-Detalles prácticos:
+Practical notes:
 
-- Los ejemplos activan `G_MESSAGES_DEBUG=all` por su cuenta y GLib escribe la
-  depuración en **stdout**. Para filtrar: `… 2>&1 | tee log | grep --line-buffered …`.
-- El prompt `Verify again?` no termina en salto de línea, así que un `grep`
-  lo oculta. Para pruebas repetidas usar `tools/verify-loop.sh`, que ejecuta
-  verify una vez por intento y anota qué dedo se usó.
-- Tras un `MATCH!` el driver no espera a que se retire el dedo; retirarlo
-  antes de iniciar otro intento.
-- `GOODIX5503_DUMP_DIR` guarda los frames como PGM y `GOODIX5503_FDT_DEBUG=1`
-  registra cada lectura del sondeo (sección 10).
+- The examples turn on `G_MESSAGES_DEBUG=all` themselves and GLib writes
+  debug output to **stdout**. To filter: `… 2>&1 | tee log | grep --line-buffered …`.
+- The `Verify again?` prompt has no trailing newline, so a `grep` hides it.
+  For repeated tests use `tools/verify-loop.sh`, which runs verify once per
+  attempt and records which finger was used.
+- After a `MATCH!` the driver does not wait for the finger to be lifted; lift
+  it before starting another attempt.
+- `GOODIX5503_DUMP_DIR` saves frames as PGM and `GOODIX5503_FDT_DEBUG=1` logs
+  every polling reading (section 10).
 
-### 7.3 Instalar
+### 7.3 Install
 
-En este sistema fprintd carga libfprint desde `/usr/local/lib/x86_64-linux-gnu/`
-(comprobar con `ldd /usr/libexec/fprintd | grep fprint`). La copia de
-`/usr/lib/x86_64-linux-gnu/` (paquete `libfprint-2-2`) se ignora.
+On this system fprintd loads libfprint from `/usr/local/lib/x86_64-linux-gnu/`
+(check with `ldd /usr/libexec/fprintd | grep fprint`). The copy in
+`/usr/lib/x86_64-linux-gnu/` (package `libfprint-2-2`) is ignored.
 
 ```bash
 mkdir -p ~/libfprint-backup
@@ -495,208 +500,205 @@ ls -la /usr/local/lib/x86_64-linux-gnu/libfprint-2.so*
 cmp build/libfprint/libfprint-2.so.2.0.0 /usr/local/lib/x86_64-linux-gnu/libfprint-2.so.2.0.0 && echo OK
 ```
 
-- Guardar las copias de seguridad **fuera** de esa carpeta: `ldconfig` puede
-  hacer que `libfprint-2.so.2` apunte a un `.bak` que esté a su lado.
-- Tras instalar hay que registrar la huella con `fprintd-enroll`; las
-  plantillas de los ejemplos no se comparten con fprintd.
-- Volver atrás: `sudo install` de la copia de seguridad + `sudo ldconfig`.
+- Keep backups **outside** that directory: `ldconfig` may point
+  `libfprint-2.so.2` at a `.bak` file sitting next to it.
+- After installing, enroll the finger with `fprintd-enroll`; the examples'
+  templates are not shared with fprintd.
+- To roll back: `sudo install` the backup + `sudo ldconfig`.
 
 ---
 
-## 8. fprintd, PAM y el inicio de sesión
+## 8. fprintd, PAM and the login screen
 
 ```bash
 fprintd-enroll -f right-index-finger
 fprintd-verify
 sudo apt install libpam-fprintd
-sudo pam-auth-update            # marcar "Fingerprint authentication"
+sudo pam-auth-update            # tick "Fingerprint authentication"
 ```
 
-- El perfil de Mint escribe `pam_fprintd.so max-tries=1 timeout=10` en
-  `/etc/pam.d/common-auth` (1 intento, 10 s). En este equipo se subió a
-  `max-tries=3 timeout=30`. Tras agotarse, se pide la contraseña; en una
-  terminal, Ctrl+C salta a la contraseña.
-- El mensaje de fprintd es "Place your … finger on <nombre del dispositivo>".
-  La pantalla de inicio (LightDM + slick-greeter) lo recortaba con el nombre
-  de la plantilla ("Goodix HTK32 Fingerprint Sensor"); por eso `full_name` es
-  ahora "Goodix 5503".
-- slick-greeter muestra el campo de contraseña y a la vez el mensaje de huella;
-  mientras `pam_fprintd` espera, la contraseña solo se acepta después de que la
-  huella se rinda.
-- **Llavero de GNOME**: al entrar con huella no hay contraseña para
-  desbloquearlo y se pide aparte ("login keyring did not get unlocked"). Es
-  el comportamiento normal en Linux. Opciones: mantenerlo (se pide una vez
-  por sesión; la elegida aquí), quitarle la contraseña con Seahorse (sin
-  cifrar en disco) o usar solo contraseña en la pantalla de inicio. Guardar la
-  contraseña de usuario para "rellenarla" tras la huella se descartó: da acceso
-  de root a quien la lea. Un desbloqueo sellado con el TPM (el equipo tiene
-  TPM 2.0) aporta poco mientras el disco no esté cifrado.
-- Para quitar la huella solo de la pantalla de inicio, sustituir
-  `@include common-auth` en `/etc/pam.d/lightdm` por una copia explícita de
-  las líneas de contraseña de `common-auth`. **No** usar el truco de "saltar
-  la primera línea": si la huella se desactivara, saltaría la contraseña y
-  bloquearía el acceso.
+- Mint's profile writes `pam_fprintd.so max-tries=1 timeout=10` into
+  `/etc/pam.d/common-auth` (1 attempt, 10 s). On this machine it was raised
+  to `max-tries=3 timeout=30`. Once they are used up, the password is asked
+  for; in a terminal, Ctrl+C skips straight to the password.
+- fprintd's prompt is "Place your … finger on <device name>". The login
+  screen (LightDM + slick-greeter) truncated it with the template's name
+  ("Goodix HTK32 Fingerprint Sensor"), hence `full_name` is now
+  "Goodix 5503".
+- slick-greeter shows the password field and the fingerprint prompt at the
+  same time; while `pam_fprintd` is waiting, the password is only accepted
+  after the fingerprint gives up.
+- **GNOME keyring**: a fingerprint login has no password to unlock it, so it
+  is asked for separately ("login keyring did not get unlocked"). This is the
+  normal behaviour on Linux. Options: keep it (asked once per session; the
+  choice made here), remove its password with Seahorse (stored unencrypted on
+  disk), or use the password only on the login screen. Storing the user
+  password to "fill it in" after the fingerprint was rejected: whoever reads
+  it gets root access. A TPM-sealed unlock (the machine has a TPM 2.0) adds
+  little while the disk is not encrypted.
+- To remove the fingerprint from the login screen only, replace
+  `@include common-auth` in `/etc/pam.d/lightdm` with an explicit copy of the
+  password lines of `common-auth`. **Do not** use the "skip the first line"
+  trick: if the fingerprint were later disabled, it would skip the password
+  and lock everyone out.
 
 ---
 
-## 9. Arranque dual con Windows (PSK)
+## 9. Dual boot with Windows (PSK)
 
-El driver de Windows provisiona **su propio PSK** en el sensor. Al inicio de
-este trabajo el sensor tenía el hash `2c26e305…` (ni el PSK cero ni el de
-`driver_5503.py`) aunque el script Python ya se había ejecutado antes. La
-primera apertura del driver escribió el PSK cero; desde entonces el hash es
-`81b8ff49…` (`PMK_HASH`). La escritura se hizo opcional para no pisarle el PSK
-a Windows en cada apertura.
+The Windows driver provisions **its own PSK** on the sensor. At the start of
+this work the sensor had the hash `2c26e305…` (neither the zero PSK nor
+`driver_5503.py`'s) even though the Python script had been run before. The
+driver's first open wrote the zero PSK; the hash then became `81b8ff49…`
+(`PMK_HASH`). The write was made optional so as not to overwrite Windows' PSK
+on every open.
 
-**Comportamiento comprobado:**
+**Confirmed behaviour:**
 
-- Windows escribe un PSK **nuevo** cada vez que encuentra uno que no es suyo.
-  Tras la primera escritura del PSK cero, un arranque de Windows dejó el hash
-  `5104d34c…`, distinto del `2c26e305…` original. **Windows Hello siguió
-  reconociendo la huella** sin volver a registrarla.
-- Sin permiso de escritura, Linux falla de forma limpia al volver: en
-  `journalctl -u fprintd` aparece `PSK mismatch, write skipped` y el TLS
-  termina con `bad record mac`. La huella queda no disponible, pero las
-  plantillas de fprintd no se pierden (no dependen del PSK).
+- Windows writes a **new** PSK whenever it finds one that is not its own.
+  After the first write of the zero PSK, one Windows boot left the hash
+  `5104d34c…`, different from the original `2c26e305…`. **Windows Hello kept
+  recognising the finger** without re-enrolling.
+- Without write permission, Linux fails cleanly on return: `journalctl -u
+  fprintd` shows `PSK mismatch, write skipped` and the TLS handshake ends with
+  `bad record mac`. The fingerprint becomes unavailable, but fprintd's
+  templates are not lost (they do not depend on the PSK).
 
-**Configuración recomendada con arranque dual:** dejar que fprintd reescriba el
-PSK con un drop-in de systemd
-([`tools/goodix5503-psk.conf`](tools/goodix5503-psk.conf)):
+**Recommended setup for dual boot:** let fprintd rewrite the PSK through a
+systemd drop-in ([`tools/goodix5503-psk.conf`](tools/goodix5503-psk.conf)):
 
 ```bash
 sudo mkdir -p /etc/systemd/system/fprintd.service.d
 sudo cp docs/goodix5503/tools/goodix5503-psk.conf /etc/systemd/system/fprintd.service.d/
 sudo systemctl daemon-reload && sudo systemctl restart fprintd
-systemctl show fprintd -p Environment     # debe mostrar GOODIX5503_ALLOW_PSK_WRITE=1
+systemctl show fprintd -p Environment     # must show GOODIX5503_ALLOW_PSK_WRITE=1
 ```
 
-Así, el primer uso de la huella tras volver de Windows registra
-`PSK mismatch and GOODIX5503_ALLOW_PSK_WRITE=1: writing PSK white box` y
-funciona con normalidad; Windows hace lo mismo por su lado. Probado en este
-equipo. Cada cambio de sistema supone una escritura en la flash del sensor,
-asumible con un uso normal.
+The first fingerprint use after coming back from Windows then logs
+`PSK mismatch and GOODIX5503_ALLOW_PSK_WRITE=1: writing PSK white box` and
+works normally; Windows does the same on its side. Tested on this machine.
+Every OS switch costs one write to the sensor's flash, which is acceptable for
+normal use.
 
-Para deshacerlo:
+To undo it:
 `sudo rm /etc/systemd/system/fprintd.service.d/goodix5503-psk.conf && sudo systemctl daemon-reload && sudo systemctl restart fprintd`.
 
-Sin el drop-in, se puede reescribir el PSK una sola vez a mano con los
-ejemplos: `printf '6\n' | GOODIX5503_ALLOW_PSK_WRITE=1 ./examples/verify`
-desde `build/`, y Ctrl+C al llegar a `Waiting for finger down`.
+Without the drop-in, the PSK can be rewritten once by hand with the examples:
+`printf '6\n' | GOODIX5503_ALLOW_PSK_WRITE=1 ./examples/verify` from
+`build/`, then Ctrl+C once `Waiting for finger down` appears.
 
 ---
 
-## 10. Variables de entorno
+## 10. Environment variables
 
-| Variable | Efecto |
+| Variable | Effect |
 |---|---|
-| `GOODIX5503_ALLOW_PSK_WRITE=1` | Permite escribir el PSK cero si el del sensor no coincide (persistente) |
-| `GOODIX5503_DUMP_DIR=<dir>` | Guarda cada frame como `clear-N.pgm` / `finger-N.pgm` (formato de `tool.write_pgm`); la numeración empieza en 0 en cada proceso |
-| `GOODIX5503_FDT_DEBUG=1` | Registra cada lectura del sondeo (`FDT-POLL …`: zonas, caídas, contador) |
+| `GOODIX5503_ALLOW_PSK_WRITE=1` | Allows writing the zero PSK when the sensor's does not match (persistent) |
+| `GOODIX5503_DUMP_DIR=<dir>` | Saves every frame as `clear-N.pgm` / `finger-N.pgm` (`tool.write_pgm` format); numbering restarts at 0 in every process |
+| `GOODIX5503_FDT_DEBUG=1` | Logs every polling reading (`FDT-POLL …`: zones, drops, counter) |
 
-Todo lo demás se registra a nivel depuración (`G_MESSAGES_DEBUG=all`): cada
-transferencia USB en hexadecimal (`USB TX` / `USB RX`), el handshake TLS paso
-a paso y los cambios de estado del sondeo. Una apertura normal no emite avisos.
-
----
-
-## 11. Seguridad
-
-- **PSK público**: el PSK es el de 32 ceros usado por goodix-fp-dump. Quien
-  pueda hablar con el sensor por USB puede establecer la sesión TLS y
-  descifrar imágenes. Con fprintd solo root accede al dispositivo; la regla
-  udev de desarrollo (`MODE="0666"`) lo abre a cualquier proceso local y debe
-  eliminarse al terminar.
-- **PGM de diagnóstico**: son imágenes de huella (datos biométricos). No se
-  incluyen en este repositorio y no deben publicarse.
-- **Plantillas**: fprintd guarda las características SIGFM en
-  `/var/lib/fprint/` (solo root).
+Everything else is logged at debug level (`G_MESSAGES_DEBUG=all`): every USB
+transfer in hex (`USB TX` / `USB RX`), the TLS handshake step by step and the
+polling state changes. A normal open emits no warnings.
 
 ---
 
-## 12. Limitaciones y trabajo pendiente
+## 11. Security
 
-**Antes de proponer el driver a libfprint:**
-
-- `goodix53x5_id_table` todavía incluye `0x5335`, `0x5385` y `0x5395`, pero el
-  driver ya solo habla el protocolo del 5503: esos sensores dejarían de
-  funcionar. Hay que quitarlos o separar el 5503 en un driver propio.
-- Código heredado sin uso en el 5503: GTLS (`crypto.c`), cálculo de OTP/FDT
-  (`calibration.c`), comandos 53x5 (`fdt_manual`, `request_image`,
-  `ec_control`, `mcu_send`, …) y parte de la lógica de suspensión del
-  transporte pensada para lecturas bloqueantes.
-- El driver se llama `goodix53x5`; renombrarlo cambiaría la ruta de las
-  plantillas en fprintd (`/var/lib/fprint/<usuario>/<driver>/…`).
-
-**Funcionalidad:**
-
-- Sin probar: bloqueo de pantalla y suspender/reanudar.
-- Cobertura del enroll: filtro de cobertura de contacto (rechazar muestras con
-  menos del ~85 %) y 16 muestras en lugar de 8. Aplazado a propósito: en la
-  práctica basta con volver a tocar.
-- `GOODIX5503_DUMP_DIR` sobrescribe los archivos entre procesos (la
-  numeración reinicia); convendría añadir la hora al nombre.
-- La semántica real de `fdt_down` / `fdt_up` como interrupción del sensor
-  sigue sin conocerse. Una captura USB de Windows Hello (USBPcap; goodix-fp-dump
-  incluye un disector de Wireshark) mostraría cómo calcula Windows los umbrales
-  y permitiría esperar el dedo sin sondear (menos consumo).
-- El OTP no se interpreta y no se usa ninguna calibración por sensor.
-- Solo se ha probado una unidad de 27c6:5503.
+- **Public PSK**: the PSK is the all-zero one used by goodix-fp-dump. Anyone
+  who can talk to the sensor over USB can establish the TLS session and
+  decrypt images. With fprintd only root can access the device; the
+  development udev rule (`MODE="0666"`) opens it to every local process and
+  must be removed when done.
+- **Diagnostic PGMs**: they are fingerprint images (biometric data). None are
+  included in this repository and they must not be published.
+- **Templates**: fprintd stores the SIGFM features in `/var/lib/fprint/`
+  (root only).
 
 ---
 
-## 13. Historia del proyecto
+## 12. Limitations and future work
 
-Resumen de los hallazgos en orden, útil para no repetir caminos ya descartados.
+**Before proposing the driver to libfprint:**
 
-1. **Punto de partida.** Carpeta de la plantilla goodix53x5 con el PID 0x5503
-   añadido. La interfaz se reclamaba bien, pero el primer ping daba timeout.
-2. **Protocolo equivocado.** Comparando byte a byte con `goodix.py`: el 5503
-   espera message packs `0xA0`, escrituras de 64 bytes, un nop sin checksum y
-   sin ACK obligatorio; la plantilla usaba el protocolo wrapless (interfaz
-   CDC 1). Reescrito el transporte; la apertura llegó hasta el PSK.
-3. **PSK y Windows.** El sensor tenía un PSK desconocido; la primera apertura
-   lo sobrescribió con el PSK cero. Se hizo la escritura opcional.
-4. **TLS.** El sensor es cliente TLS-PSK; se implementó el servidor con BIOs
-   de memoria de OpenSSL. El flag del handshake es `0xB0`, no `0xB2`.
-5. **Configuración y primera imagen.** `DEVICE_CONFIG` mide 256 bytes (el
-   parcheo 53x5 lo habría corrompido). La imagen llega en un pack `0xB2`
-   (prefijo de 9 bytes + TLS) y se descifra a 7684 bytes. Las imágenes de
-   referencia del proyecto Python resultaron tener el dedo puesto en todas.
-6. **Captura en scan.c y geometría.** Se reutilizó el patrón de sub-SSMs de la
-   plantilla. La imagen es 64×80, no 80×64.
-7. **Detección de dedo.** El `0x32` tras `fdt_down` es incondicional
-   (experimentos de 5.1). Un sondeo de diagnóstico con el usuario tocando el
-   sensor mostró que el dedo baja las lecturas de las zonas; se sustituyó la
-   espera por eventos por un sondeo de `fdt_mode` a 10 Hz con umbrales
-   medidos.
-8. **Enroll y verify.** Primer enroll completo 8/8. Verify: sin falsos
-   positivos; falsos negativos por cobertura del sensor, aceptados.
-9. **Instalación.** Limpieza de avisos de depuración; corrección del cuelgue
-   por toques rápidos (referencia tomada con el dedo puesto); PAM; nombre
-   corto del dispositivo para la pantalla de inicio; decisión sobre el llavero.
-10. **Arranque dual.** Tras un arranque de Windows, el sensor tenía un PSK
-    nuevo y Linux falló como estaba previsto (sin escribir nada). Windows Hello
-    había seguido funcionando, así que se activó la reescritura automática en
-    fprintd con un drop-in de systemd; desde entonces la huella funciona en
-    los dos sistemas.
+- `goodix53x5_id_table` still lists `0x5335`, `0x5385` and `0x5395`, but the
+  driver now only speaks the 5503 protocol: those sensors would stop
+  working. They must be removed, or the 5503 split into its own driver.
+- Inherited code unused on the 5503: GTLS (`crypto.c`), OTP/FDT math
+  (`calibration.c`), 53x5 commands (`fdt_manual`, `request_image`,
+  `ec_control`, `mcu_send`, …) and part of the transport's suspend logic
+  meant for blocking reads.
+- The driver is named `goodix53x5`; renaming it would change the path of the
+  templates in fprintd (`/var/lib/fprint/<user>/<driver>/…`).
+
+**Features:**
+
+- Enroll coverage: a contact coverage filter (reject samples below ~85 %)
+  and 16 samples instead of 8. Deferred on purpose: in practice touching
+  again is enough.
+- `GOODIX5503_DUMP_DIR` overwrites files across processes (numbering
+  restarts); the file names should include the time.
+- The real semantics of `fdt_down` / `fdt_up` as a sensor interrupt are still
+  unknown. A USB capture of Windows Hello (USBPcap; goodix-fp-dump ships a
+  Wireshark dissector) would show how Windows computes the thresholds and
+  would allow waiting for the finger without polling (lower power).
+- The OTP is not interpreted and no per-sensor calibration is used.
+- Only one 27c6:5503 unit has been tested.
 
 ---
 
-## 14. Herramientas de análisis
+## 13. Project history
 
-En `docs/goodix5503/tools/`:
+The findings in order, to avoid retracing paths that were already ruled out.
 
-| Herramienta | Uso |
+1. **Starting point.** The goodix53x5 template directory with PID 0x5503
+   added. The interface was claimed fine, but the first ping timed out.
+2. **Wrong protocol.** Comparing byte by byte with `goodix.py`: the 5503
+   expects `0xA0` message packs, 64-byte writes and a nop without checksum
+   and without a mandatory ACK; the template used the wrapless protocol (CDC
+   interface 1). The transport was rewritten; the open got as far as the PSK.
+3. **PSK and Windows.** The sensor had an unknown PSK; the first open
+   overwrote it with the zero PSK. The write was made optional.
+4. **TLS.** The sensor is a TLS-PSK client; the server was implemented with
+   OpenSSL memory BIOs. The handshake flag is `0xB0`, not `0xB2`.
+5. **Configuration and first image.** `DEVICE_CONFIG` is 256 bytes (the 53x5
+   patching would have corrupted it). The image arrives in a `0xB2` pack
+   (9-byte prefix + TLS) and decrypts to 7684 bytes. The reference images of
+   the Python project turned out to all have the finger on the sensor.
+6. **Capture in scan.c and geometry.** The template's sub-SSM pattern was
+   reused. The image is 64×80, not 80×64.
+7. **Finger detection.** The `0x32` after `fdt_down` is unconditional (the
+   experiments in 5.1). A diagnostic probe with the user touching the sensor
+   showed that a finger lowers the zone readings; the event-based wait was
+   replaced by 10 Hz polling of `fdt_mode` with measured thresholds.
+8. **Enroll and verify.** First complete 8/8 enroll. Verify: no false
+   positives; false negatives due to sensor coverage, accepted.
+9. **Installation.** Debug warnings cleaned up; fix for the hang on quick
+   touches (reference frame taken with the finger on); PAM; short device
+   name for the login screen; decision about the keyring.
+10. **Dual boot.** After a Windows boot the sensor had a new PSK and Linux
+    failed as intended (without writing anything). Windows Hello had kept
+    working, so automatic rewriting was enabled in fprintd with a systemd
+    drop-in; since then the fingerprint works in both systems. Unlocking
+    after a suspend was checked as well.
+
+---
+
+## 14. Analysis tools
+
+In `docs/goodix5503/tools/`:
+
+| Tool | Use |
 |---|---|
-| `fdt_poll_analysis.py LOG` | Resumen de cada espera de un log con `GOODIX5503_FDT_DEBUG=1`: lecturas antes del toque, reinicios del contador en la retirada, recuperaciones |
-| `verify_analysis.py LOG` | Tabla de un log de `verify-loop.sh`: detección, puntuación por muestra, resultado, aciertos por tipo de dedo |
-| `verify-loop.sh [DEDO] [LOG]` | Verify repetido y etiquetado, desde `build/` |
-| `coverage.py DIR [UMBRAL]` | Cobertura de contacto de pares `clear-N`/`finger-N` de `GOODIX5503_DUMP_DIR` |
-| `pgm_montage.py OUT.png A.pgm …` | Frames lado a lado en un PNG (requiere Pillow) |
-| `70-goodix5503.rules` | Regla udev de desarrollo (solo pruebas) |
-| `goodix5503-psk.conf` | Drop-in de systemd para que fprintd reescriba el PSK tras usar Windows (sección 9) |
+| `fdt_poll_analysis.py LOG` | Summary of every wait in a log recorded with `GOODIX5503_FDT_DEBUG=1`: readings before the touch, counter resets during the lift, recoveries |
+| `verify_analysis.py LOG` | Table of a `verify-loop.sh` log: detection, score per sample, result, matches per finger type |
+| `verify-loop.sh [FINGER] [LOG]` | Repeated, labelled verify, run from `build/` |
+| `coverage.py DIR [THRESHOLD]` | Contact coverage of `clear-N`/`finger-N` pairs from `GOODIX5503_DUMP_DIR` |
+| `pgm_montage.py OUT.png A.pgm …` | Frames side by side in one PNG (needs Pillow) |
+| `70-goodix5503.rules` | Development udev rule (testing only) |
+| `goodix5503-psk.conf` | systemd drop-in so fprintd rewrites the PSK after Windows (section 9) |
 
-Ejemplo de prueba de detección:
+Example detection test:
 
 ```bash
 cd build
@@ -707,12 +709,12 @@ printf '3\nn\n' | GOODIX5503_FDT_DEBUG=1 ./examples/enroll 2>&1 | tee ~/poll.log
 
 ---
 
-## 15. Referencias
+## 15. References
 
-- goodix-fp-dump (protocolo, `driver_5503.py`, MIT):
+- goodix-fp-dump (protocol, `driver_5503.py`, MIT):
   <https://github.com/goodix-fp-linux-dev/goodix-fp-dump> (commit `cc43bb3`)
-- goodix53x5-libfprint (plantilla, LGPL-2.1):
+- goodix53x5-libfprint (template, LGPL-2.1):
   <https://github.com/AndyHazz/goodix53x5-libfprint> (commit `309d4c6`)
-- SIGFM (LGPL-2.1+): incluido en la plantilla, `libfprint/sigfm/`
+- SIGFM (LGPL-2.1+): included in the template, `libfprint/sigfm/`
 - libfprint: <https://gitlab.freedesktop.org/libfprint/libfprint>
   (base: `6f9479c3`)

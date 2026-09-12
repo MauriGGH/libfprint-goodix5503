@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Tabulate a labelled verify run produced by verify-loop.sh.
 
-One row per attempt: the finger label typed before it (m = enrolled finger,
-o = another finger, p = another person), finger detection, frame mean, the
-SIGFM score of every enrolled sample, the best score and the result.
+One row per attempt: the finger label typed before it (e = enrolled finger,
+o = another finger, p = another person; older logs used m for the enrolled
+finger), finger detection, frame mean, the SIGFM score of every enrolled
+sample, the best score and the result.
 
 The log must come from examples/verify, which enables debug output itself,
 so that the per-sample "sigfm_score" lines are present.
@@ -15,7 +16,8 @@ import sys
 
 atts, cur = [], None
 for line in open(sys.argv[1], errors="replace"):
-    m = re.match(r"=== intento (\d+) dedo=(\S*)", line)
+    # "=== attempt N finger=X"; older logs used "=== intento N dedo=X"
+    m = re.match(r"=== (?:attempt|intento) (\d+) (?:finger|dedo)=(\S*)", line)
     if m:
         cur = {"n": int(m.group(1)), "who": m.group(2), "scores": [],
                "res": None, "extra": []}
@@ -46,7 +48,7 @@ for line in open(sys.argv[1], errors="replace"):
         cur["extra"].append(line.split("**:")[-1].strip()[:100])
 
 for a in atts:
-    print(f"#{a['n']:2} dedo={a['who']:2} det={a.get('det', '-'):10} "
+    print(f"#{a['n']:2} finger={a['who']:2} det={a.get('det', '-'):10} "
           f"mean={a.get('mean', '-'):>4} best={a.get('best', '-'):>7} "
           f"res={a['res']}  samples={a['scores']}")
     for e in a["extra"]:
@@ -55,4 +57,4 @@ for a in atts:
 for who in sorted({a["who"] for a in atts}):
     rows = [a for a in atts if a["who"] == who]
     matches = sum(1 for a in rows if a["res"] == "MATCH")
-    print(f"dedo={who}: {matches}/{len(rows)} MATCH")
+    print(f"finger={who}: {matches}/{len(rows)} MATCH")

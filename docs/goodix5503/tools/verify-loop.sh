@@ -13,10 +13,10 @@ log=${2:-verify-loop.log}
 
 i=1
 while [ "$i" -le 30 ]; do
-  printf 'Intento %s - retira el dedo, escribe m (mi dedo), o (otro dedo), p (otra persona) o q (terminar): ' "$i"
+  printf 'Attempt %s - lift your finger, then type e (enrolled finger), o (other finger), p (other person) or q (quit): ' "$i"
   read -r who
   [ "$who" = q ] && break
-  echo "=== intento $i dedo=$who" >> "$log"
+  echo "=== attempt $i finger=$who" >> "$log"
   printf '%s\nn\n' "$finger" | ./examples/verify 2>&1 | tee -a "$log" |
     grep --line-buffered -E 'Waiting for finger down|MATCH|SIGFM score|Failed to verify'
   i=$((i + 1))

@@ -1,78 +1,74 @@
-# libfprint con soporte para Goodix 27c6:5503
+# libfprint with Goodix 27c6:5503 support
 
-> Fork de [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint) que
-> añade un driver para el lector de huellas **Goodix `27c6:5503`** (Lenovo
-> IdeaPad 3 15ITL6 / 82H8), hasta ahora sin soporte en Linux.
->
-> *Fork of libfprint adding a driver for the Goodix 27c6:5503 fingerprint
-> sensor. Full documentation (in Spanish):
-> [docs/goodix5503/README.md](docs/goodix5503/README.md).*
+> Fork of [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint)
+> that adds a driver for the **Goodix `27c6:5503`** fingerprint reader
+> (Lenovo IdeaPad 3 15ITL6 / 82H8), which had no Linux support.
 
-Con este driver el lector funciona con **fprintd**: registro de huellas,
-verificación, `sudo` e inicio de sesión mediante PAM, en un equipo con
-arranque dual con Windows.
+With this driver the reader works with **fprintd**: enrollment, verification,
+`sudo` and login through PAM, on a machine that dual-boots Windows.
 
-**Documentación completa del proceso y los hallazgos:
+**Full documentation of the process and findings:
 [docs/goodix5503/README.md](docs/goodix5503/README.md)**
-(protocolo, mediciones, decisiones, instalación, limitaciones e historia del
-proyecto).
+(protocol, measurements, decisions, installation, limitations and project
+history).
 
-## Estado
+## Status
 
-| Función | Estado |
+| Feature | Status |
 |---|---|
-| Apertura, handshake TLS-PSK y configuración del sensor | Funciona |
-| Captura y descifrado de imágenes (64×80, 12 bits) | Funciona |
-| Detección de dedo puesto / retirado | Funciona (sondeo de zonas) |
-| Enroll, verify e identify (matching SIGFM) | Funciona |
-| fprintd + PAM (`sudo`, inicio de sesión) | Funciona |
-| Arranque dual con Windows | Funciona, reescribiendo el PSK al volver a Linux |
-| Bloqueo de pantalla, suspender/reanudar | Sin probar |
+| Sensor open, TLS-PSK handshake and configuration | Works |
+| Image capture and decryption (64×80, 12-bit) | Works |
+| Finger down / finger up detection | Works (zone polling) |
+| Enroll, verify and identify (SIGFM matching) | Works |
+| fprintd + PAM (`sudo`, login) | Works |
+| Dual boot with Windows | Works, rewriting the PSK when coming back to Linux |
+| Lock screen, suspend/resume | Works (unlocking after a suspend tested) |
 
-Precisión medida: ningún otro dedo aceptado (0 de 9 intentos). El centro de la
-yema se reconoce de forma fiable; la punta y los costados pueden requerir
-repetir el toque, porque el sensor solo ve una parte del dedo.
+Measured accuracy: no other finger accepted (0 out of 9 attempts). The centre
+of the pad is recognised reliably; the tip and the sides may need a second
+touch, because the sensor only sees part of the finger.
 
-## Qué cambia respecto a libfprint
+## What changes compared to libfprint
 
-- `libfprint/drivers/goodix53x5/`: el driver. Parte de
+- `libfprint/drivers/goodix53x5/`: the driver. It starts from
   [AndyHazz/goodix53x5-libfprint](https://github.com/AndyHazz/goodix53x5-libfprint)
-  (chips 5335/5385/5395), pero el 5503 usa otro protocolo, así que el
-  transporte, la sesión, el cifrado y la captura están reescritos según
-  `driver_5503.py` de
+  (5335/5385/5395 chips), but the 5503 speaks a different protocol, so the
+  transport, session, encryption and capture are rewritten after
+  `driver_5503.py` from
   [goodix-fp-dump](https://github.com/goodix-fp-linux-dev/goodix-fp-dump).
-- `libfprint/sigfm/`: matching de huellas basado en SIFT (OpenCV), de la misma
-  plantilla.
-- `meson.build`, `libfprint/meson.build`: registro del driver, OpenSSL y OpenCV.
-- `docs/goodix5503/`: documentación y herramientas de análisis.
+- `libfprint/sigfm/`: SIFT-based fingerprint matching (OpenCV), from the same
+  template.
+- `meson.build`, `libfprint/meson.build`: driver registration, OpenSSL and
+  OpenCV.
+- `docs/goodix5503/`: documentation and analysis tools.
 
-## Hallazgos principales
+## Main findings
 
-- **Protocolo**: cada transferencia va en un "message pack" (`0xA0` comandos,
-  `0xB0` handshake TLS, `0xB2` imágenes), con escrituras de 64 bytes.
-- **Cifrado**: el sensor abre una sesión TLS 1.2 PSK
-  (`PSK-AES128-CBC-SHA256`) como cliente; el driver es el servidor, con OpenSSL
-  sobre BIOs de memoria. Solo las imágenes viajan cifradas.
-- **Detección de dedo**: los eventos FDT del sensor no sirven (responde al
-  armado siempre, haya dedo o no). El driver sondea a 10 Hz las lecturas de
-  las 6 zonas del sensor, con umbrales medidos: el dedo baja las lecturas 89
-  puntos o más, frente a un ruido de ±2.6.
-- **Arranque dual**: Windows escribe su propio PSK en el sensor cada vez que
-  encuentra otro. Windows Hello sigue funcionando, y en Linux fprintd puede
-  reescribir el suyo automáticamente (`GOODIX5503_ALLOW_PSK_WRITE=1`).
+- **Protocol**: every transfer is a "message pack" (`0xA0` commands, `0xB0`
+  TLS handshake, `0xB2` images), written in 64-byte chunks.
+- **Encryption**: the sensor opens a TLS 1.2 PSK session
+  (`PSK-AES128-CBC-SHA256`) as the client; the driver is the server, using
+  OpenSSL over memory BIOs. Only images travel encrypted.
+- **Finger detection**: the sensor's FDT events are unusable (it answers the
+  arming every time, finger or not). The driver polls the readings of the
+  sensor's 6 zones at 10 Hz with measured thresholds: a finger lowers them by
+  89 points or more, against ±2.6 of noise.
+- **Dual boot**: Windows writes its own PSK to the sensor whenever it finds
+  another one. Windows Hello keeps working, and on Linux fprintd can write its
+  own back automatically (`GOODIX5503_ALLOW_PSK_WRITE=1`).
 
-## Instalación rápida
+## Quick install
 
-Resumen; los detalles, advertencias y cómo volver atrás están en la
-[documentación](docs/goodix5503/README.md#7-compilar-probar-e-instalar).
+A summary; details, caveats and how to roll back are in the
+[documentation](docs/goodix5503/README.md#7-build-test-and-install).
 
 ```bash
-# meson >= 0.62 (el de Ubuntu 22.04 / Mint 21 es más antiguo)
+# meson >= 0.62 (Ubuntu 22.04 / Mint 21 ship an older one)
 python3 -m venv ~/meson-venv && ~/meson-venv/bin/pip install meson ninja
 ~/meson-venv/bin/meson setup build -Ddrivers=goodix53x5
 ninja -C build
 
-# Instalar donde lo cargue fprintd (comprobar con: ldd /usr/libexec/fprintd)
+# Install where fprintd loads it from (check with: ldd /usr/libexec/fprintd)
 sudo install -m 755 build/libfprint/libfprint-2.so.2.0.0 /usr/local/lib/x86_64-linux-gnu/
 sudo ldconfig
 
@@ -80,15 +76,15 @@ fprintd-enroll -f right-index-finger
 sudo apt install libpam-fprintd && sudo pam-auth-update
 ```
 
-Con arranque dual, añadir además el drop-in de systemd
+On dual-boot machines also add the systemd drop-in
 [`docs/goodix5503/tools/goodix5503-psk.conf`](docs/goodix5503/tools/goodix5503-psk.conf)
-(ver la [sección 9](docs/goodix5503/README.md#9-arranque-dual-con-windows-psk)).
+(see [section 9](docs/goodix5503/README.md#9-dual-boot-with-windows-psk)).
 
-## Créditos y licencia
+## Credits and license
 
-- Protocolo del 5503: [goodix-fp-dump](https://github.com/goodix-fp-linux-dev/goodix-fp-dump) (MIT).
-- Driver base y SIGFM: [AndyHazz/goodix53x5-libfprint](https://github.com/AndyHazz/goodix53x5-libfprint) (LGPL-2.1).
-- libfprint: LGPL-2.1, ver el README original a continuación.
+- 5503 protocol: [goodix-fp-dump](https://github.com/goodix-fp-linux-dev/goodix-fp-dump) (MIT).
+- Base driver and SIGFM: [AndyHazz/goodix53x5-libfprint](https://github.com/AndyHazz/goodix53x5-libfprint) (LGPL-2.1).
+- libfprint: LGPL-2.1, see the original README below.
 
 ---
 
