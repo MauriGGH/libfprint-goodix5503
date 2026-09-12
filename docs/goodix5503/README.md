@@ -51,6 +51,7 @@ queda pendiente.
 | Enroll (8 muestras) | Funciona |
 | Verify / identify (SIGFM) | Funciona; ver precisión en 6.4 |
 | fprintd + PAM (`sudo`, inicio de sesión) | Funciona |
+| Arranque dual con Windows | Funciona, reescribiendo el PSK automáticamente (sección 9) |
 | Bloqueo de pantalla, suspender/reanudar | Sin probar |
 
 Precisión medida (sección 6.4): **0 de 9** intentos con otro dedo aceptados.
@@ -547,12 +548,40 @@ primera apertura del driver escribió el PSK cero; desde entonces el hash es
 `81b8ff49…` (`PMK_HASH`). La escritura se hizo opcional para no pisarle el PSK
 a Windows en cada apertura.
 
-- Si tras usar Windows la huella deja de funcionar en Linux, buscar
-  `PSK mismatch` en `journalctl -u fprintd`.
-- Reescribir el PSK exige `GOODIX5503_ALLOW_PSK_WRITE=1` en el entorno del
-  proceso (para fprintd, un override de systemd). Puede dejar Windows Hello sin
-  funcionar hasta que Windows lo reescriba, y ambos sistemas podrían pisarse
-  en cada arranque. Aún no se sabe si Windows lo reescribe en cada arranque.
+**Comportamiento comprobado:**
+
+- Windows escribe un PSK **nuevo** cada vez que encuentra uno que no es suyo.
+  Tras la primera escritura del PSK cero, un arranque de Windows dejó el hash
+  `5104d34c…`, distinto del `2c26e305…` original. **Windows Hello siguió
+  reconociendo la huella** sin volver a registrarla.
+- Sin permiso de escritura, Linux falla de forma limpia al volver: en
+  `journalctl -u fprintd` aparece `PSK mismatch, write skipped` y el TLS
+  termina con `bad record mac`. La huella queda no disponible, pero las
+  plantillas de fprintd no se pierden (no dependen del PSK).
+
+**Configuración recomendada con arranque dual:** dejar que fprintd reescriba el
+PSK con un drop-in de systemd
+([`tools/goodix5503-psk.conf`](tools/goodix5503-psk.conf)):
+
+```bash
+sudo mkdir -p /etc/systemd/system/fprintd.service.d
+sudo cp docs/goodix5503/tools/goodix5503-psk.conf /etc/systemd/system/fprintd.service.d/
+sudo systemctl daemon-reload && sudo systemctl restart fprintd
+systemctl show fprintd -p Environment     # debe mostrar GOODIX5503_ALLOW_PSK_WRITE=1
+```
+
+Así, el primer uso de la huella tras volver de Windows registra
+`PSK mismatch and GOODIX5503_ALLOW_PSK_WRITE=1: writing PSK white box` y
+funciona con normalidad; Windows hace lo mismo por su lado. Probado en este
+equipo. Cada cambio de sistema supone una escritura en la flash del sensor,
+asumible con un uso normal.
+
+Para deshacerlo:
+`sudo rm /etc/systemd/system/fprintd.service.d/goodix5503-psk.conf && sudo systemctl daemon-reload && sudo systemctl restart fprintd`.
+
+Sin el drop-in, se puede reescribir el PSK una sola vez a mano con los
+ejemplos: `printf '6\n' | GOODIX5503_ALLOW_PSK_WRITE=1 ./examples/verify`
+desde `build/`, y Ctrl+C al llegar a `Waiting for finger down`.
 
 ---
 
@@ -600,8 +629,7 @@ a paso y los cambios de estado del sondeo. Una apertura normal no emite avisos.
 
 **Funcionalidad:**
 
-- Sin probar: bloqueo de pantalla, suspender/reanudar, comportamiento tras
-  arrancar Windows.
+- Sin probar: bloqueo de pantalla y suspender/reanudar.
 - Cobertura del enroll: filtro de cobertura de contacto (rechazar muestras con
   menos del ~85 %) y 16 muestras en lugar de 8. Aplazado a propósito: en la
   práctica basta con volver a tocar.
@@ -646,6 +674,11 @@ Resumen de los hallazgos en orden, útil para no repetir caminos ya descartados.
 9. **Instalación.** Limpieza de avisos de depuración; corrección del cuelgue
    por toques rápidos (referencia tomada con el dedo puesto); PAM; nombre
    corto del dispositivo para la pantalla de inicio; decisión sobre el llavero.
+10. **Arranque dual.** Tras un arranque de Windows, el sensor tenía un PSK
+    nuevo y Linux falló como estaba previsto (sin escribir nada). Windows Hello
+    había seguido funcionando, así que se activó la reescritura automática en
+    fprintd con un drop-in de systemd; desde entonces la huella funciona en
+    los dos sistemas.
 
 ---
 
@@ -661,6 +694,7 @@ En `docs/goodix5503/tools/`:
 | `coverage.py DIR [UMBRAL]` | Cobertura de contacto de pares `clear-N`/`finger-N` de `GOODIX5503_DUMP_DIR` |
 | `pgm_montage.py OUT.png A.pgm …` | Frames lado a lado en un PNG (requiere Pillow) |
 | `70-goodix5503.rules` | Regla udev de desarrollo (solo pruebas) |
+| `goodix5503-psk.conf` | Drop-in de systemd para que fprintd reescriba el PSK tras usar Windows (sección 9) |
 
 Ejemplo de prueba de detección:
 
